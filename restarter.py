@@ -3,6 +3,7 @@
 import os
 import sys
 import json
+import queue
 import docker
 import threading
 
@@ -17,6 +18,8 @@ client = docker.from_env()
 
 master_ip = os.environ["MASTER_IP"]
 
+restart_queue = queue.Queue()
+
 def watch(image):
     for evt in client.events(filters={"image": image}):
         # print(evt, "\n\n")
@@ -27,17 +30,23 @@ def watch(image):
                 print(event["id"], " -> ", event["status"])
                 if event["status"] == "die":
                     container_id = event["id"]
-                    container = client.containers.get(container_id)
-                    container.restart()
+                    # container = client.containers.get(container_id)
+                    # container.restart()
+                    restart_queue.put(container_id)
 
-# thread = threading.Thread(target=watch, args=[image_name])
-# thread.start()
+def restart(restart_queue):
+    container_id = restart_queue.get()
+    container = client.containers.get(container_id)
+    container.restart()
+
+thread = threading.Thread(target=restart, args=[restart_queue])
+thread.start()
 
 for _ in range(num_containers):
     client.containers.run(image_name, detach=True, environment={"MASTER_IP": master_ip})
 
 print("Ready.")
 
-# thread.join()
-
 watch(image_name)
+
+thread.join()
