@@ -4,57 +4,41 @@ import os
 import sys
 import json
 import docker
-import multiprocessing
+import argparse
 
-def watch(client, restart_queue, image_name):
-    for evt in client.events(filters={"image": image_name}):
-        json_docs = evt.decode().split("\n")
+
+def run(image_name, rabbitmq_url, redis_url):
+    os.system('''docker run --rm -d {} \
+        --ulimit nofile=1024:1024 \
+        /worker.py {} {} &'''
+        .format(image_name, rabbitmq_url, redis_url))
+
+def watch(image_name, rabbitmq_url, redis_url):
+    client = docker.from_env()
+    for evt in client.events(filters={'image': image_name}):
+        json_docs = evt.decode().split('\n')
         for json_doc in json_docs:
             if json_doc:
                 event = json.loads(json_doc)
-                if event["status"] == "die":
-                    container_id = event["id"]
-                    restart_queue.put(container_id)
-
-def restart(client, restart_queue, fallback_image_name, master_ip):
-    while True:
-        container_id = restart_queue.get()
-        if container_id:
-            print("Restarting", container_id)
-            container = client.containers.get(container_id)
-            container.restart()
-        else:
-            print("Starting new container")
-            client.containers.run(fallback_image_name, detach=True,
-                environment={"MASTER_IP": master_ip})
+                if event['status'] == 'die':
+                    run(image_name, rabbitmq_url, redis_url)
 
 def main():
-    if len(sys.argv) < 3:
-        print("Usage: {} <image_name> <num_containers>".format(sys.argv[0]))
-        sys.exit(1)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('rabbitmq_url', help='rabbitmq url, ex: amqp://host1')
+    parser.add_argument('redis_url', help='redis url, ex: redis://192.168.1.2')
+    parser.add_argument('image_name', help='image name, ex: alvelazq/taskrunner-py')
+    parser.add_argument('num_containers', help='number of containers on this host', type=int)
+    args = parser.parse_args()
 
-    image_name = sys.argv[1]
-    num_containers = int(sys.argv[2])
+    for _ in range(args.num_containers):
+        run(args.image_name, args.rabbitmq_url, args.redis_url)
 
-    client = docker.from_env()
+    try:
+        watch(args.image_name, args.rabbitmq_url, args.redis_url)
+    except KeyboardInterrupt:
+        pass
 
-    master_ip = os.environ["MASTER_IP"]
 
-    restart_queue = multiprocessing.Queue()
-
-    num_restarter_threads = 5
-
-    restarter_threads = [multiprocessing.Process(target=restart,
-        args=(client, restart_queue, image_name, master_ip))
-        for _ in range(num_restarter_threads)]
-
-    [thread.start() for thread in restarter_threads]
-
-    [restart_queue.put("") for _ in range(num_containers)]
-
-    watch(client, restart_queue, image_name)
-
-    [thread.join() for thread in restarter_threads] # Unreachable
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

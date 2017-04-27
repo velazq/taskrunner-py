@@ -6,16 +6,10 @@ import json
 import pika
 import uuid
 import redis
+import argparse
 
-host = os.environ["MASTER_IP"]
 
-redisdb = redis.StrictRedis(host=host)
-
-connection = pika.BlockingConnection(pika.ConnectionParameters(host=host))
-channel = connection.channel()
-channel.queue_declare(queue="task_queue", durable=True)
-
-def send(filepath, source_code):
+def send(filepath, source_code, channel):
     task_id = str(uuid.uuid4())
     msg = {"task_id": task_id, "filepath": filepath, "source_code": source_code}
     jsonmsg = json.dumps(msg)
@@ -25,10 +19,9 @@ def send(filepath, source_code):
                           properties=pika.BasicProperties(
                              delivery_mode=2, # make message persistent
                           ))
-    # print(" [x] Sent %r" % jsonmsg)
     return task_id
 
-def get_reply(task_id):
+def get_reply(task_id, redisdb):
     reply = redisdb.brpop(task_id)[1]
     redisdb.delete(task_id)
     return json.loads(reply)
@@ -39,12 +32,29 @@ def get_files(folder, ext):
             for filename in filenames
             if filename.endswith(ext))
 
-def dispatch(filepath):
+def dispatch(filepath, channel):
     with open(filepath) as f:
-        return send(f.name, f.read())
+        return send(f.name, f.read(), channel)
 
-task_ids = [dispatch(f) for d in sys.argv[1:] for f in get_files(d, "py")]
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("rabbitmq_url", help="rabbitmq url, ex: amqp://host1")
+    parser.add_argument("redis_url", help="redis url, ex: redis://192.168.1.2")
+    parser.add_argument("folder", help="folder to be sent")
+    args = parser.parse_args()
 
-[print(get_reply(id)) for id in task_ids]
+    redisdb = redis.StrictRedis.from_url(args.redis_url)
 
-connection.close()
+    connection = pika.BlockingConnection(pika.URLParameters(args.rabbitmq_url))
+    channel = connection.channel()
+    channel.queue_declare(queue="task_queue", durable=True)
+
+    task_ids = [dispatch(f, channel) for f in get_files(args.folder, ".py")]
+
+    [print(get_reply(task_id, redisdb)) for task_id in task_ids]
+
+    connection.close()
+
+
+if __name__ == "__main__":
+    main()

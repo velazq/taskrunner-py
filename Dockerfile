@@ -1,6 +1,9 @@
 FROM python
-RUN mkdir /tmp/data
+
 RUN pip3 install pika redis
 COPY *.py /
-WORKDIR /
-CMD ["python3", "/worker.py"]
+RUN chmod +x /*.py
+
+RUN useradd nopriv
+USER nopriv
+RUN mkdir /tmp/data
