@@ -3,50 +3,58 @@
 import os
 import sys
 import json
-import queue
 import docker
-import threading
+import multiprocessing
 
-if len(sys.argv) < 3:
-    print("Usage: {} <image_name> <num_containers>".format(sys.argv[0]))
-    sys.exit(1)
-
-image_name = sys.argv[1]
-num_containers = int(sys.argv[2])
-
-client = docker.from_env()
-
-master_ip = os.environ["MASTER_IP"]
-
-restart_queue = queue.Queue()
-
-def watch(image):
-    for evt in client.events(filters={"image": image}):
-        # print(evt, "\n\n")
+def watch(client, restart_queue, image_name):
+    for evt in client.events(filters={"image": image_name}):
         json_docs = evt.decode().split("\n")
         for json_doc in json_docs:
             if json_doc:
                 event = json.loads(json_doc)
-                print(event["id"], " -> ", event["status"])
                 if event["status"] == "die":
                     container_id = event["id"]
-                    # container = client.containers.get(container_id)
-                    # container.restart()
                     restart_queue.put(container_id)
 
-def restart(restart_queue):
-    container_id = restart_queue.get()
-    container = client.containers.get(container_id)
-    container.restart()
+def restart(client, restart_queue, fallback_image_name, master_ip):
+    while True:
+        container_id = restart_queue.get()
+        if container_id:
+            print("Restarting", container_id)
+            container = client.containers.get(container_id)
+            container.restart()
+        else:
+            print("Starting new container")
+            client.containers.run(fallback_image_name, detach=True,
+                environment={"MASTER_IP": master_ip})
 
-thread = threading.Thread(target=restart, args=[restart_queue])
-thread.start()
+def main():
+    if len(sys.argv) < 3:
+        print("Usage: {} <image_name> <num_containers>".format(sys.argv[0]))
+        sys.exit(1)
 
-for _ in range(num_containers):
-    client.containers.run(image_name, detach=True, environment={"MASTER_IP": master_ip})
+    image_name = sys.argv[1]
+    num_containers = int(sys.argv[2])
 
-print("Ready.")
+    client = docker.from_env()
 
-watch(image_name)
+    master_ip = os.environ["MASTER_IP"]
 
-thread.join()
+    restart_queue = multiprocessing.Queue()
+
+    num_restarter_threads = 5
+
+    restarter_threads = [multiprocessing.Process(target=restart,
+        args=(client, restart_queue, image_name, master_ip))
+        for _ in range(num_restarter_threads)]
+
+    [thread.start() for thread in restarter_threads]
+
+    [restart_queue.put("") for _ in range(num_containers)]
+
+    watch(client, restart_queue, image_name)
+
+    [thread.join() for thread in restarter_threads] # Unreachable
+
+if __name__ == "__main__":
+    main()
